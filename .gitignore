@@ -1,0 +1,70 @@
+# ===============================
+# ESP-IDF / CMake build artifacts
+# ===============================
+build/
+sdkconfig.old
+sdkconfig.save
+sdkconfig.defaults
+sdkconfig.ci
+
+# Generated flash / OTA images
+*.bin
+*.elf
+*.map
+*.hex
+
+# ===============================
+# ESP-IDF tools & caches
+# ===============================
+.dependencies/
+managed_components/
+.cmake/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# ===============================
+# ESP-IDF monitor & logs
+# ===============================
+*.log
+monitor.log
+
+# ===============================
+# Python / virtual environments
+# ===============================
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# ===============================
+# Editor / IDE files
+# ===============================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# ===============================
+# OS-specific files
+# ===============================
+.DS_Store
+Thumbs.db
+
+# ===============================
+# Debug / profiling outputs
+# ===============================
+gdb.txt
+core
+core.*
+
+# ===============================
+# Temporary / misc
+# ===============================
+*.tmp
+*.temp
