@@ -1,43 +1,125 @@
 #include <stdio.h>
 #include "string.h"
 
-#include "driver/spi_master.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+
+extern "C"
+{
+#include "can.h"
+#include "mcp2515.h"
+}
 #include "driver/gpio.h"
+#include "driver/spi_master.h"
+#include "esp_intr_alloc.h"
+#include "esp_log.h"
+#include "esp_task_wdt.h"
 
 #include "CanManager.hpp"
 #include "can.hpp"
-#include "esp_log.h"
 
-#include "freertos/FreeRTOS.h"
-extern "C"
-{
-#include "spi-helper.h"
-#include "MCP2515.h"
-#include "mcp_can_dfs.h"
-}
-
-#define std_id_comm
+#define PIN_NUM_MISO 13
+#define PIN_NUM_MOSI 11
+#define PIN_NUM_CLK 12
+#define PIN_NUM_CS 10
+constexpr char TAG[] = "BidirectionalCAN";
 
 CAN::CanManager canManager;
-constexpr char TAG[] = "BidirectionalCAN";
+#define std_id_comm // Uncomment for standard ID, comment for extended ID
+
+static void printCanRxMessage(const char *source,
+                              uint32_t can_id,
+                              const uint8_t *data,
+                              uint8_t dlc,
+                              bool is_extended,
+                              bool is_rtr)
+{
+    char id_str[9];
+
+    if (is_extended)
+    {
+        // 29-bit extended ID → 8 hex digits
+        snprintf(id_str, sizeof(id_str), "%08lX", can_id);
+    }
+    else
+    {
+        // 11-bit standard ID → 3 hex digits
+        snprintf(id_str, sizeof(id_str), "%03lX", can_id & 0x7FF);
+    }
+
+    char payload_str[3 * 8 + 1]; // "AA BB CC DD EE FF GG HH"
+    payload_str[0] = '\0';
+
+    if (dlc > 0 && !is_rtr)
+    {
+        for (uint8_t i = 0; i < dlc; i++)
+        {
+            char byte_str[4];
+            snprintf(byte_str, sizeof(byte_str), "%02X ", data[i]);
+            strncat(payload_str,
+                    byte_str,
+                    sizeof(payload_str) - strlen(payload_str) - 1);
+        }
+    }
+
+    ESP_LOGW(TAG,
+             "%s Received: ID: 0x%s, DLC: %d, Extended: %s, RTR: %s, Data: %s",
+             source,
+             id_str,
+             dlc,
+             is_extended ? "Yes" : "No",
+             is_rtr ? "Yes" : "No",
+             (dlc > 0 && !is_rtr) ? payload_str : "N/A");
+}
 
 void handleReceivedMessage(const twai_message_t &CanMessage)
 {
-    uint32_t canID = CanMessage.identifier;
-    uint8_t data[8] = {0};
-    uint8_t size = CanMessage.data_length_code;
-    memcpy(data, CanMessage.data, size);
+    ESP_LOGI(TAG, "TWAI Message received!");
 
-    bool is_extended = CanMessage.extd;
-    bool is_rtr = CanMessage.rtr;
+    printCanRxMessage(
+        "TWAI",
+        CanMessage.identifier,
+        CanMessage.data,
+        CanMessage.data_length_code,
+        CanMessage.extd,
+        CanMessage.rtr);
+}
 
-    ESP_LOGW(TAG, "TWAI Received: ID: 0x%lX, DLC: %d, Extended: %s, RTR: %s",
-             canID, size, is_extended ? "Yes" : "No", is_rtr ? "Yes" : "No");
+// Fixed: Declare as struct, not array
+CAN_FRAME_t can_frame_tx;
+CAN_FRAME_t can_frame_rx;
 
-    if (size > 0 && !is_rtr)
-    {
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, size, ESP_LOG_INFO);
-    }
+bool SPI_Init(void)
+{
+    printf("Hello from SPI_Init!\n\r");
+    esp_err_t ret;
+
+    // Configuration for the SPI bus
+    spi_bus_config_t bus_cfg = {};
+    bus_cfg.miso_io_num = PIN_NUM_MISO;
+    bus_cfg.mosi_io_num = PIN_NUM_MOSI;
+    bus_cfg.sclk_io_num = PIN_NUM_CLK;
+    bus_cfg.quadwp_io_num = -1;
+    bus_cfg.quadhd_io_num = -1;
+    bus_cfg.max_transfer_sz = 0;
+
+    // Define MCP2515 SPI device configuration
+    spi_device_interface_config_t dev_cfg = {};
+    dev_cfg.mode = 0;
+    dev_cfg.clock_speed_hz = 10 * 1000 * 1000; // 10 MHz
+    dev_cfg.spics_io_num = PIN_NUM_CS;
+    dev_cfg.queue_size = 8;
+
+    // Initialize SPI bus
+    ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+    ESP_ERROR_CHECK(ret);
+
+    // Add MCP2515 SPI device to the bus
+    ret = spi_bus_add_device(SPI2_HOST, &dev_cfg, &MCP2515_Object->spi);
+    ESP_ERROR_CHECK(ret);
+
+    return true;
 }
 
 void MCP_RW_Task(void *arg)
@@ -59,6 +141,7 @@ void MCP_RW_Task(void *arg)
 #else
     uint32_t twai_extd_id = 0x0817FCFA;
 #endif
+    ESP_LOGI(TAG, "Starting CAN communication loop...");
 
     while (1)
     {
@@ -68,56 +151,72 @@ void MCP_RW_Task(void *arg)
 #else
         esp_err_t ret = canManager.transmit(twai_extd_id, twai_test_data, 8, 1, 0, 0, 0, 0);
 #endif
-
         if (ret != ESP_OK)
         {
             ESP_LOGE(TAG, "TWAI TX: Failed to transmit. Error: %s", esp_err_to_name(ret));
         }
-        vTaskDelay(pdMS_TO_TICKS(100)); // Small delay between operations
+        vTaskDelay(pdMS_TO_TICKS(50));
 
 // ============ Send test message from MCP2515 ============
 #ifdef std_id_comm
-        uint8_t mcp_result = sendMsgBuf(mcp_std_id, 8, mcp_test_data);
+        can_frame_tx->can_id = mcp_std_id;
 #else
-        uint8_t mcp_result = sendMsgBuf(mcp_extd_id | CAN_IS_EXTENDED, 8, mcp_test_data);
+        can_frame_tx->can_id = mcp_extd_id | CAN_EFF_FLAG;
 #endif
-        if (mcp_result != CAN_OK)
+        can_frame_tx->can_dlc = 8;
+        memcpy(can_frame_tx->data, mcp_test_data, 8);
+
+        ERROR_t tx_result = MCP2515_sendMessageAfterCtrlCheck(can_frame_tx);
+        if (tx_result == ERROR_ALLTXBUSY)
         {
-            ESP_LOGE(TAG, "MCP TX: Failed to send message. Error code: 0x%02X", mcp_result);
+            ESP_LOGW(TAG, "All TX buffers busy.");
         }
-        vTaskDelay(pdMS_TO_TICKS(100)); // Small delay between operations
 
-        // ============ Check for MCP2515 received messages ============
-        uint32_t rx_id = 0;
-        uint8_t rx_len = 0;
-        uint8_t rx_buf[8] = {0};
-
-        uint8_t read_result = readMsgBuf(&rx_id, &rx_len, rx_buf);
-
-        if (read_result == CAN_OK)
+        // Check for received messages
+        if (MCP2515_checkReceive())
         {
-            bool is_extended = (rx_id & CAN_IS_EXTENDED) != 0;
-            bool is_rtr = (rx_id & CAN_IS_REMOTE_REQUEST) != 0;
-            uint32_t clean_id = rx_id & CAN_EXTENDED_ID;
-
-            ESP_LOGW(TAG, "MCP Received: ID: 0x%lX, DLC: %d, Extended: %s, RTR: %s",
-                     clean_id, rx_len, is_extended ? "Yes" : "No", is_rtr ? "Yes" : "No");
-
-            if (rx_len > 0 && !is_rtr)
+            ERROR_t rx_result = MCP2515_readMessageAfterStatCheck(can_frame_rx);
+            if (rx_result == ERROR_OK)
             {
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, rx_buf, rx_len, ESP_LOG_INFO);
+                ESP_LOGI(TAG, "MCP 2515 Message received!");
+                bool is_extended = (can_frame_rx->can_id & CAN_EFF_FLAG) != 0;
+                bool is_rtr = (can_frame_rx->can_id & CAN_RTR_FLAG) != 0;
+
+                uint32_t id = can_frame_rx->can_id &
+                              (is_extended ? CAN_EFF_MASK : CAN_SFF_MASK);
+
+                printCanRxMessage(
+                    "MCP2515",
+                    id,
+                    can_frame_rx->data,
+                    can_frame_rx->can_dlc,
+                    is_extended,
+                    is_rtr);
+            }
+            else
+            {
+                ESP_LOGE(TAG, "Failed to read message. Error: %d", rx_result);
             }
         }
-        else if (read_result != CAN_NOMSG)
+
+        // Check for errors
+        if (MCP2515_checkError())
         {
-            ESP_LOGW(TAG, "MCP RX: Error reading message. Error code: 0x%02X", read_result);
+            uint8_t error_flags = MCP2515_getErrorFlags();
+            ESP_LOGW(TAG, "CAN Error detected. Flags: 0x%02X", error_flags);
+
+            if (error_flags & (EFLG_RX0OVR | EFLG_RX1OVR))
+            {
+                ESP_LOGW(TAG, "RX buffer overflow detected, clearing...");
+                MCP2515_clearRXnOVR();
+            }
         }
 
         // Update test data for next iteration (optional - creates changing pattern)
         mcp_test_data[0] = (mcp_test_data[0] + 1) & 0xFF;
         twai_test_data[0] = (twai_test_data[0] + 1) & 0xFF;
 
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Main loop delay
+        vTaskDelay(50); // Main loop delay
     }
 }
 
@@ -146,22 +245,40 @@ extern "C" void app_main(void)
     canManager.startReceiving();
     ESP_LOGI(TAG, "TWAI receiver started");
 
-    // ============ Initialize SPI and MCP2515 ============
-    ESP_LOGI(TAG, "Initializing SPI interface...");
-    len = 0;
-    spi_init();
-    add_device_one();
-    ESP_LOGI(TAG, "SPI interface initialized");
-
     ESP_LOGI(TAG, "Initializing MCP2515...");
-    if (MCP2515_begin(MCP_ANY, CAN_250KBPS, MCP_8MHZ) != CAN_OK)
+    if (MCP2515_init() != ERROR_OK)
     {
-        ESP_LOGE(TAG, "MCP2515 initialization failed!");
+        ESP_LOGE(TAG, "MCP2515 initialization failed.");
         return;
     }
     ESP_LOGI(TAG, "MCP2515 initialized successfully");
 
-    if (setMode(MCP_NORMAL) != MCP2515_OK)
+    ESP_LOGI(TAG, "Initializing SPI interface...");
+    if (SPI_Init())
+    {
+        ESP_LOGI(TAG, "SPI interface initialized");
+    }
+    else
+    {
+        ESP_LOGE(TAG, "SPI initialization failed.");
+        return;
+    }
+
+    if (MCP2515_reset() != ERROR_OK)
+    {
+        ESP_LOGE(TAG, "MCP2515 reset failed.");
+        return;
+    }
+    ESP_LOGI(TAG, "MCP2515 reset success.");
+
+    if (MCP2515_setBitrate(CAN_250KBPS, MCP_8MHZ) != ERROR_OK)
+    {
+        ESP_LOGE(TAG, "MCP2515 setBitrate failed.");
+        return;
+    }
+    ESP_LOGI(TAG, "MCP2515 setBitrate success.");
+
+    if (MCP2515_setNormalMode() != ERROR_OK)
     {
         ESP_LOGE(TAG, "Failed to set MCP2515 to Normal Mode!");
         return;
