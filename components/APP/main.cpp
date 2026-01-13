@@ -19,10 +19,11 @@ extern "C"
 #include "CanManager.hpp"
 #include "can.hpp"
 
-#define PIN_NUM_MISO 13
-#define PIN_NUM_MOSI 11
-#define PIN_NUM_CLK 12
-#define PIN_NUM_CS 10
+#define PIN_NUM_MISO 39
+#define PIN_NUM_MOSI 40
+#define PIN_NUM_CLK 41
+#define PIN_NUM_CS 38
+
 constexpr char TAG[] = "BidirectionalCAN";
 
 CAN::CanManager canManager;
@@ -155,7 +156,7 @@ void MCP_RW_Task(void *arg)
         {
             ESP_LOGE(TAG, "TWAI TX: Failed to transmit. Error: %s", esp_err_to_name(ret));
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(100));
 
 // ============ Send test message from MCP2515 ============
 #ifdef std_id_comm
@@ -216,7 +217,7 @@ void MCP_RW_Task(void *arg)
         mcp_test_data[0] = (mcp_test_data[0] + 1) & 0xFF;
         twai_test_data[0] = (twai_test_data[0] + 1) & 0xFF;
 
-        vTaskDelay(50); // Main loop delay
+        vTaskDelay(1000); // Main loop delay
     }
 }
 
