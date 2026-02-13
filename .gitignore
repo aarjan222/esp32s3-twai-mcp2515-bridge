@@ -6,6 +6,8 @@ sdkconfig.old
 sdkconfig.save
 sdkconfig.defaults
 sdkconfig.ci
+.cache/
+
 
 # Generated flash / OTA images
 *.bin
