@@ -65,7 +65,7 @@ static void printCanRxMessage(const char *source,
     }
 
     ESP_LOGW(TAG,
-             "%s Received: ID: 0x%s, DLC: %d, Extended: %s, RTR: %s, Data: %s",
+             "%s ID: 0x%s, DLC: %d, Extended: %s, RTR: %s, Data: %s",
              source,
              id_str,
              dlc,
@@ -79,7 +79,7 @@ void handleReceivedMessage(const twai_message_t &CanMessage)
     ESP_LOGI(TAG, "TWAI Message received!");
 
     printCanRxMessage(
-        "TWAI",
+        "TWAI-received",
         CanMessage.identifier,
         CanMessage.data,
         CanMessage.data_length_code,
@@ -156,6 +156,25 @@ void MCP_RW_Task(void *arg)
         {
             ESP_LOGE(TAG, "TWAI TX: Failed to transmit. Error: %s", esp_err_to_name(ret));
         }
+        else
+        {
+            printCanRxMessage(
+                "TWAI-Transmitted",
+#ifdef std_id_comm
+                twai_std_id,
+#else
+                twai_extd_id,
+#endif
+                twai_test_data,
+                8,
+#ifndef std_id_comm
+                true,
+#else
+                false,
+#endif
+                false /* RTR */
+            );
+        }
         vTaskDelay(pdMS_TO_TICKS(100));
 
 // ============ Send test message from MCP2515 ============
@@ -170,7 +189,31 @@ void MCP_RW_Task(void *arg)
         ERROR_t tx_result = MCP2515_sendMessageAfterCtrlCheck(can_frame_tx);
         if (tx_result == ERROR_ALLTXBUSY)
         {
-            ESP_LOGW(TAG, "All TX buffers busy.");
+            ESP_LOGW(TAG, "MCP25625: All TX buffers busy.");
+        }
+        else if (tx_result != ERROR_OK)
+        {
+            ESP_LOGE(TAG, "MCP2515 TX Failed with error: %d", tx_result);
+        }
+        else
+        {
+            // Successfully sent from MCP2515
+            printCanRxMessage(
+                "MCP2515-Transmitted",
+#ifdef std_id_comm
+                mcp_std_id,
+#else
+                mcp_extd_id,
+#endif
+                mcp_test_data,
+                8,
+#ifndef std_id_comm
+                true,
+#else
+                false,
+#endif
+                false /* RTR */
+            );
         }
 
         // Check for received messages
@@ -187,7 +230,7 @@ void MCP_RW_Task(void *arg)
                               (is_extended ? CAN_EFF_MASK : CAN_SFF_MASK);
 
                 printCanRxMessage(
-                    "MCP2515",
+                    "MCP2515-received",
                     id,
                     can_frame_rx->data,
                     can_frame_rx->can_dlc,
@@ -208,7 +251,7 @@ void MCP_RW_Task(void *arg)
 
             if (error_flags & (EFLG_RX0OVR | EFLG_RX1OVR))
             {
-                ESP_LOGW(TAG, "RX buffer overflow detected, clearing...");
+                ESP_LOGW(TAG, "MCP2515 RX buffer overflow detected, clearing...");
                 MCP2515_clearRXnOVR();
             }
         }
@@ -272,7 +315,7 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "MCP2515 reset success.");
 
-    if (MCP2515_setBitrate(CAN_250KBPS, MCP_8MHZ) != ERROR_OK)
+    if (MCP2515_setBitrate(CAN_250KBPS, MCP_16MHZ) != ERROR_OK) // 
     {
         ESP_LOGE(TAG, "MCP2515 setBitrate failed.");
         return;
